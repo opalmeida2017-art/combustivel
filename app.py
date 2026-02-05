@@ -6,17 +6,21 @@ import base64
 from datetime import datetime
 from decimal import Decimal
 import warnings
+from dotenv import load_dotenv
 
 # --- 1. CONFIGURAÇÃO GERAL ---
 st.set_page_config(page_title="Abastecimento Seguro", layout="wide", initial_sidebar_state="collapsed")
 warnings.filterwarnings('ignore')
+
+# Carrega variáveis de ambiente (para uso local)
+load_dotenv()
 
 # Pasta de fotos (Cria se não existir)
 PASTA_FOTOS = "fotos_abastecimento"
 if not os.path.exists(PASTA_FOTOS):
     os.makedirs(PASTA_FOTOS)
 
-# --- 2. BANCO DE DADOS (CONEXÃO HÍBRIDA: NUVEM/LOCAL) ---
+# --- 2. BANCO DE DADOS (CONEXÃO HÍBRIDA) ---
 def init_connection():
     """
     Conecta ao banco. Prioriza a URL da Render. Se não achar, tenta localhost.
@@ -27,16 +31,22 @@ def init_connection():
         if db_url:
             return psycopg2.connect(db_url)
         else:
-            return psycopg2.connect(host="localhost", database="Combustivel", user="postgres", password="admin")
+            return psycopg2.connect(
+                host=os.getenv("DB_HOST", "localhost"),
+                database=os.getenv("DB_NAME", "Combustivel"),
+                user=os.getenv("DB_USER", "postgres"),
+                password=os.getenv("DB_PASS", "admin")
+            )
     except Exception as e:
         st.error(f"Erro de conexão: {e}")
         st.stop()
 
-# --- 3. AUTO-MIGRATION (ESSENCIAL PARA RENDER) ---
-# Esta função cria a tabela sozinha se ela não existir no banco novo
+# --- 3. AUTO-MIGRATION (CRIA TABELA E COLUNA NOVA) ---
 def criar_tabelas_se_nao_existirem():
     conn = init_connection()
     cursor = conn.cursor()
+    
+    # 1. Cria a tabela básica se não existir
     query_criar = """
     CREATE TABLE IF NOT EXISTS registro_abastecimento (
         id SERIAL PRIMARY KEY,
@@ -49,11 +59,22 @@ def criar_tabelas_se_nao_existirem():
         foto_km_path TEXT,
         foto_inicial_path TEXT,
         foto_final_path TEXT,
+        tanque_cheio BOOLEAN DEFAULT FALSE,
         data_hora TIMESTAMP DEFAULT CURRENT_TIMESTAMP
     );
     """
     cursor.execute(query_criar)
     conn.commit()
+    
+    # 2. Tenta adicionar a coluna 'tanque_cheio' caso a tabela seja antiga e não tenha
+    try:
+        cursor.execute("ALTER TABLE registro_abastecimento ADD COLUMN tanque_cheio BOOLEAN DEFAULT FALSE;")
+        conn.commit()
+    except Exception:
+        # Se der erro (ex: coluna já existe), apenas ignora e segue a vida
+        conn.rollback()
+        pass
+
     conn.close()
 
 # Executa a verificação do banco assim que o app liga
@@ -66,12 +87,12 @@ def salvar_abastecimento(dados):
     try:
         query = """
         INSERT INTO registro_abastecimento 
-        (apartamento_id, placa, km_veiculo, leitura_inicial, leitura_final, litros_total, foto_km_path, foto_inicial_path, foto_final_path)
-        VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s)
+        (apartamento_id, placa, km_veiculo, leitura_inicial, leitura_final, litros_total, foto_km_path, foto_inicial_path, foto_final_path, tanque_cheio)
+        VALUES (1, %s, %s, %s, %s, %s, %s, %s, %s, %s)
         """
         cursor.execute(query, (
             dados['placa'], dados['km'], dados['inicio'], dados['fim'], dados['litros'],
-            dados['f_km'], dados['f_ini'], dados['f_fim']
+            dados['f_km'], dados['f_ini'], dados['f_fim'], dados['tanque_cheio']
         ))
         conn.commit()
     except Exception as e:
@@ -82,7 +103,7 @@ def salvar_abastecimento(dados):
 def listar_historico_completo():
     conn = init_connection()
     query = """
-    SELECT data_hora, placa, km_veiculo, leitura_inicial, leitura_final, litros_total, 
+    SELECT data_hora, placa, km_veiculo, leitura_inicial, leitura_final, litros_total, tanque_cheio,
            foto_km_path, foto_inicial_path, foto_final_path 
     FROM registro_abastecimento ORDER BY id DESC LIMIT 50
     """
@@ -111,7 +132,7 @@ st.markdown("""
 <style>
     .stApp { background-color: #f1f8e9; }
     h1, h2, h3 { color: #2e7d32 !important; font-weight: 800; }
-    .stTextInput label, .stNumberInput label { color: #1b5e20 !important; font-weight: bold; font-size: 16px; }
+    .stTextInput label, .stNumberInput label, .stCheckbox label { color: #1b5e20 !important; font-weight: bold; font-size: 16px; }
     
     .stTextInput input, .stNumberInput input {
         background-color: white !important; color: #1b5e20 !important;
@@ -218,6 +239,11 @@ if st.session_state.pagina == 'home':
                                             <h2 style="margin:0; color: #1b5e20;">Total: {litros} Litros</h2>
                                         </div>
                                         """, unsafe_allow_html=True)
+                                        
+                                        # --- NOVO CAMPO: TANQUE CHEIO ---
+                                        st.write("")
+                                        # Usamos um toggle (chave) que é mais bonito que checkbox no mobile
+                                        tanque_cheio = st.toggle("O Tanque foi completado até a boca?", value=False, key=f"tq_{rid}")
 
                                         # Salvar
                                         if st.button("✔ SALVAR REGISTRO", type="primary"):
@@ -225,7 +251,8 @@ if st.session_state.pagina == 'home':
                                                 'placa': placa, 'km': km, 'inicio': inicio, 'fim': fim, 'litros': litros,
                                                 'f_km': salvar_foto(foto_km, "KM"),
                                                 'f_ini': salvar_foto(foto_ini, "INI"),
-                                                'f_fim': salvar_foto(foto_fim, "FIM")
+                                                'f_fim': salvar_foto(foto_fim, "FIM"),
+                                                'tanque_cheio': tanque_cheio
                                             }
                                             salvar_abastecimento(dados)
                                             st.balloons()
@@ -291,7 +318,7 @@ elif st.session_state.pagina == 'historico':
         df['foto_final_path'] = df['foto_final_path'].apply(converter_imagem_para_base64)
 
         df = df.rename(columns={
-            'data_hora': 'Data', 'placa': 'Placa', 'km_veiculo': 'KM',
+            'data_hora': 'Data', 'placa': 'Placa', 'km_veiculo': 'KM', 'tanque_cheio': 'Tanque Cheio',
             'litros_total': 'Litros', 'leitura_inicial': 'Inicial', 'leitura_final': 'Final',
             'foto_km_path': 'Foto KM', 'foto_inicial_path': 'Foto Ini', 'foto_final_path': 'Foto Fim'
         })
@@ -305,6 +332,7 @@ elif st.session_state.pagina == 'historico':
                 "Placa": st.column_config.TextColumn("Placa", width="small"),
                 "KM": st.column_config.NumberColumn("KM", format="%d"),
                 "Litros": st.column_config.NumberColumn("Litros", format="%.2f L"),
+                "Tanque Cheio": st.column_config.CheckboxColumn("Tanque Cheio", width="small"),
                 "Inicial": st.column_config.NumberColumn("Ini", format="%.1f"),
                 "Final": st.column_config.NumberColumn("Fim", format="%.1f"),
                 "Foto KM": st.column_config.ImageColumn("Painel", width="small"),

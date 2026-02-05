@@ -1,0 +1,9 @@
+# Ignorar pasta de fotos
+fotos_abastecimento/
+
+# Ignorar arquivos de sistema e cache do Python (Boas práticas)
+__pycache__/
+*.pyc
+venv/
+.env
+.DS_Store
